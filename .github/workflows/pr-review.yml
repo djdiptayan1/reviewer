@@ -1,0 +1,83 @@
+name: PR Review Agent
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  pr-review:
+    runs-on: ubuntu-latest
+    if: github.actor != 'dependabot[bot]'
+    
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Cache dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install additional tools
+        run: |
+          # Install static analysis tools
+          pip install flake8 bandit mypy
+          # Install Node.js tools if needed
+          npm install -g eslint
+
+      - name: Validate configuration
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python -m src.pr_agent.cli --validate-config
+
+      - name: Run PR Review Agent
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python -m src.pr_agent.cli \
+            --provider github \
+            --owner ${{ github.repository_owner }} \
+            --repo ${{ github.event.repository.name }} \
+            --pr ${{ github.event.number }} \
+            --verbose
+
+      - name: Handle review failure
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Post a comment about the failure
+          python -c "
+          import os
+          import requests
+          
+          token = os.environ['GITHUB_TOKEN']
+          headers = {'Authorization': f'token {token}', 'Accept': 'application/vnd.github+json'}
+          
+          url = f'https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.number }}/comments'
+          data = {
+              'body': '⚠️ **PR Review Agent Failed**\n\nThe automated review could not be completed. Please check the workflow logs for details.\n\n*This is an automated message.*'
+          }
+          
+          response = requests.post(url, json=data, headers=headers)
+          print(f'Posted failure comment: {response.status_code}')
+          "
